@@ -5,11 +5,34 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "firstchair"
 version = "0.1.0a2"
-description = "Local-first orchestration for AI coding CLIs"
+description = "Local-first CLI that makes Codex, Claude Code and Grok review each other's work"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = [
+    "ai-coding", "coding-agents", "multi-agent", "code-review", "cli", "local-first",
+    "codex", "claude-code", "grok", "orchestration",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/GrayManSam/firstchair"
+Documentation = "https://github.com/GrayManSam/firstchair/blob/main/docs/orchestration.md"
+Changelog = "https://github.com/GrayManSam/firstchair/blob/main/CHANGELOG.md"
+Issues = "https://github.com/GrayManSam/firstchair/issues"
 
 [project.scripts]
 firstchair = "firstchair.cli:main"

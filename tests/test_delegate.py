@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -71,6 +72,7 @@ class DelegateTests(unittest.TestCase):
         environment = {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FIRSTCHAIR_WORKTREE_ROOT": str(self.temp / "worktrees"),
+            "FIRSTCHAIR_SESSION": "fixture-session",
             "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
             "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
         }
@@ -127,6 +129,101 @@ class DelegateTests(unittest.TestCase):
             self.assertEqual(delegate.select_worker("auto", "claude", "read"), "codex")
             with self.assertRaisesRegex(delegate.DelegateError, "no eligible read worker"):
                 delegate.select_worker("auto", "codex", "read")
+        # Automatic write selection never reaches Grok, whichever seat leads.
+        with mock.patch.object(delegate.shutil, "which", side_effect={"grok": "/fake/grok"}.get):
+            for lead in ("claude", "codex"):
+                with self.assertRaisesRegex(delegate.DelegateError, "no eligible write worker"):
+                    delegate.select_worker("auto", lead, "write")
+        for order in delegate.WORKER_ORDER.values():
+            self.assertNotIn("grok", order["write"])
+
+    def test_another_session_cannot_collect_or_finish_a_job(self):
+        code, out, error = self._main("run", "codex", "Edit", "--mode", "write", "--name", "owned")
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(out)["session"], "fixture-session")
+        listed = json.loads(self._main("list")[1])
+        self.assertEqual(listed["worktrees"][0]["session"], "fixture-session")
+        worktree = self.temp / "worktrees" / "repo" / "owned"
+        for session in ("other-session", None):
+            with self.subTest(session=session):
+                environment = {} if session is None else {"FIRSTCHAIR_SESSION": session}
+                with mock.patch.dict(os.environ, environment):
+                    if session is None:
+                        del os.environ["FIRSTCHAIR_SESSION"]
+                    for command in (("collect", "owned"), ("finish", "owned", "--delete-branch", "--force")):
+                        code, out, error = self._main(*command)
+                        self.assertEqual(code, 2, out)
+                        self.assertIn("belongs to session fixture-session", error)
+                self.assertTrue((worktree / "added.txt").exists())
+                self.assertEqual(self._git("log", "--oneline", "delegate/owned").count("\n"), 1)
+        # Naming the owner on the command line is the deliberate way across.
+        with mock.patch.dict(os.environ, {"FIRSTCHAIR_SESSION": "other-session"}):
+            code, _, error = self._main("--session", "fixture-session", "collect", "owned")
+            self.assertEqual(code, 0, error)
+            code, _, error = self._main("--session", "Not Valid", "finish", "owned")
+            self.assertEqual(code, 2)
+            self.assertIn("session must be", error)
+
+    def test_a_run_without_a_session_makes_one_and_an_older_job_has_no_owner(self):
+        with mock.patch.dict(os.environ):
+            del os.environ["FIRSTCHAIR_SESSION"]
+            code, out, error = self._main("run", "codex", "Edit", "--mode", "write", "--name", "fresh")
+            self.assertEqual(code, 0, error)
+            made = json.loads(out)["session"]
+            self.assertRegex(made, r"^s-[0-9a-f]{12}$")
+            code, _, error = self._main("finish", "fresh", "--force")
+            self.assertEqual(code, 2)
+            self.assertIn(f"pass --session {made}", error)
+            # A job from before sessions existed has no session file.
+            (self.repo / ".firstchair" / "delegations" / "fresh" / "session").unlink()
+            code, _, error = self._main("finish", "fresh", "--force", "--delete-branch")
+            self.assertEqual(code, 0, error)
+
+    def test_rotation_runs_the_worker_under_the_account_with_the_most_room(self):
+        from firstchair.accounts import account_environment
+        from firstchair.quota import Quota, Window
+
+        state = self.temp / "xdg"
+        state.mkdir(mode=0o700)
+        used = {None: 95, "spare": 20, "full": 100}
+
+        def reader(provider, profile, **_):
+            return Quota((Window(used[profile], 300, 2_000_000_000),), True, time.time())
+
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}), \
+                mock.patch.object(delegate, "read_quota", side_effect=reader):
+            for name in ("spare", "full"):
+                account_environment("codex", name, create=True)
+            code, out, error = self._main("run", "codex", "Review", "--rotate-accounts", "--dry-run")
+            self.assertEqual(code, 0, error)
+            planned = json.loads(out)
+            self.assertEqual((planned["account_selection"], planned["account"]), ("rotated", "codex:spare"))
+            self.assertEqual(
+                {item["account"]: item["status"] for item in planned["account_candidates"]},
+                {"codex": "over_budget", "codex:spare": "ready", "codex:full": "exhausted"},
+            )
+            code, out, error = self._main("run", "codex", "Review", "--name", "rotated", "--rotate-accounts")
+            self.assertEqual(code, 0, error)
+            summary = json.loads(out)
+            self.assertEqual(summary["account"], "codex:spare")
+            ledger = json.loads((state / "firstchair" / "account-ledger.json").read_text())
+            # The finished work is counted against the account that ran it.
+            self.assertEqual(len(ledger["accounts"]["codex:spare"]["events"]), 1)
+            self.assertEqual(ledger["accounts"]["codex"]["events"], [])
+            self.assertNotIn("Review", json.dumps(ledger))
+
+            code, out, error = self._main(
+                "run", "codex", "Review", "--rotate-accounts", "--profile", "spare", "--dry-run",
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("leave out --profile", error)
+            used.update({None: 100, "spare": 100})
+            # Every account full: nothing starts.
+            (state / "firstchair" / "account-ledger.json").unlink()
+            code, out, error = self._main("run", "codex", "Review", "--name", "none-left", "--rotate-accounts")
+            self.assertEqual(code, 2, out)
+            self.assertIn("every codex account is out of usage", error)
+            self.assertFalse((self.repo / ".firstchair" / "delegations" / "none-left").exists())
 
     def test_unknown_codex_version_does_not_report_usage(self):
         with mock.patch.dict(os.environ, {"FAKE_CODEX_VERSION": "0.0.0"}):
@@ -150,7 +247,8 @@ class DelegateTests(unittest.TestCase):
         self.assertIsNone(summary["branch"])
         self.assertFalse((self.temp / "worktrees" / "repo" / "scout").exists())
         directory = Path(summary["logs"])
-        self.assertEqual([path.name for path in directory.iterdir()], ["summary.json"])
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["session", "summary.json"])
+        self.assertEqual((directory / "session").read_text(), "fixture-session\n")
         saved = json.loads((directory / "summary.json").read_text())
         self.assertNotIn("reply", saved)
         self.assertNotIn("task", saved)
@@ -182,7 +280,17 @@ class DelegateTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["reply"], "## Summary\nfake grok mode read")
 
-        code, out, _ = self._main("run", "grok", "Edit", "--mode", "write", "--name", "g-write")
+        for extra in ((), ("--dry-run",)):
+            code, out, error = self._main("run", "grok", "Edit", "--mode", "write", "--name", "g-write", *extra)
+            self.assertEqual(code, 2)
+            self.assertEqual(out, "")
+            self.assertIn("--allow-grok-write", error)
+        self.assertEqual(self._git("branch", "--list", "delegate/*").strip(), "")
+        self.assertFalse((self.repo / ".firstchair" / "delegations" / "g-write").exists())
+
+        code, out, _ = self._main(
+            "run", "grok", "Edit", "--mode", "write", "--name", "g-write", "--allow-grok-write",
+        )
         summary = json.loads(out)
         self.assertEqual(code, 0)
         self.assertIn("M README.md", summary["changes"]["status"])
@@ -293,6 +401,7 @@ class DelegateTests(unittest.TestCase):
         self.assertFalse(use_stdin)
         self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace")
         self.assertIn("--disallowed-tools", argv)
+        self.assertIn("--no-subagents", argv)
 
 
 if __name__ == "__main__":

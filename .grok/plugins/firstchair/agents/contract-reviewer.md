@@ -10,6 +10,6 @@ agents_md: true
 
 Review the provider parser diff. Do not edit files.
 
-Check that the provider version is pinned, failures use existing fail-closed `ProviderError` codes, fixtures are invented, and the diff contains no credentials. Confirm the live adapter is still disabled and that tests cover the change.
+Check that the provider version is pinned, failures use existing fail-closed `ProviderError` codes, fixtures are invented, and the diff contains no credentials. Check that tests cover the change and that the live adapter preserves its read-only contract.
 
 Report findings with file paths.

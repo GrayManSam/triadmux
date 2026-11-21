@@ -1,5 +1,8 @@
 # Firstchair handoff for Grok
 
+> Historical checkpoint. See [provider contracts](provider-contracts.md) and
+> [orchestration](orchestration.md) for current behavior and verification.
+
 Continue the MVP toward `0.1.0a1` from the Git checkpoint that introduced
 this file. The package version at this checkpoint is `0.0.0`. Read
 `AGENTS.md`, `ROADMAP.md`, `TODO.md`, and

@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-from firstchair.workflow import record_path, recover_workflow, run_workflow, save
+from firstchair.provider import ProviderError
+from firstchair.state_listing import list_runs
+from firstchair.workflow import continue_workflow, record_path, recover_workflow, run_workflow, save
 
 
 class WorkflowTests(unittest.TestCase):
@@ -152,3 +154,118 @@ run_workflow("synthetic task", Path(sys.argv[1]), str, lambda _: input(), str)
     def test_invalid_run_id(self):
         with self.assertRaises(ValueError):
             record_path(Path("."), "../outside")
+
+    def test_usage_failure_resumes_without_repeating_the_finished_stage(self):
+        calls = []
+
+        def plan(task):
+            calls.append(("plan", task))
+            return "saved plan"
+
+        def fail(_text):
+            calls.append("fail")
+            raise ProviderError("rate_limited")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            failed = run_workflow("keep going", state_dir, plan, fail, self.fail)
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["stage_outputs"]["plan"], "saved plan")
+            self.assertNotIn("keep going", json.dumps(list_runs(state_dir)))
+
+            def review(text):
+                calls.append(("review", text))
+                return "saved review"
+
+            def synthesize(text):
+                calls.append(("synthesize", text))
+                return "finished"
+
+            resumed = continue_workflow(
+                state_dir, failed["run_id"], self.fail, review, synthesize,
+            )
+            self.assertEqual(resumed["status"], "completed")
+            self.assertEqual(resumed["result"], "finished")
+            self.assertEqual(resumed["stage_outputs"]["review"], "saved review")
+            self.assertEqual(calls, [("plan", "keep going"), "fail", ("review", "saved plan"), ("synthesize", "saved review")])
+
+    def test_interrupt_keeps_finished_stages_for_an_abandoned_resume(self):
+        calls = []
+
+        def plan(_task):
+            calls.append("plan")
+            return "saved plan"
+
+        def stop(_text):
+            calls.append("stop")
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            stopped = run_workflow("task", state_dir, plan, stop, self.fail)
+            self.assertEqual(stopped["status"], "interrupted")
+            self.assertEqual(stopped["stage"], "review")
+            self.assertNotIn("error", stopped)
+            path = record_path(state_dir, stopped["run_id"])
+            abandoned = json.loads(path.read_text(encoding="utf-8"))
+            abandoned["status"] = "running"
+            path.write_text(json.dumps(abandoned), encoding="utf-8")
+
+            def review(text):
+                calls.append(("review", text))
+                return "saved review"
+
+            resumed = continue_workflow(
+                state_dir, stopped["run_id"], self.fail, review, lambda text: f"done:{text}",
+            )
+            self.assertEqual(resumed["status"], "completed")
+            self.assertEqual(resumed["result"], "done:saved review")
+            self.assertEqual(calls, ["plan", "stop", ("review", "saved plan")])
+
+    def test_authorization_failure_cannot_be_resumed(self):
+        def fail(_text):
+            raise ProviderError("authorization_failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            failed = run_workflow("task", state_dir, str, fail, self.fail)
+            self.assertEqual(failed["error"], "authorization_failed")
+            with self.assertRaisesRegex(ValueError, "usage failure"):
+                continue_workflow(state_dir, failed["run_id"], self.fail, self.fail, self.fail)
+            self.assertEqual(
+                json.loads(record_path(state_dir, failed["run_id"]).read_text(encoding="utf-8"))["status"],
+                "failed",
+            )
+
+    def test_invalid_saved_output_leaves_a_usage_failure_unchanged(self):
+        def fail(_text):
+            raise ProviderError("rate_limited")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            failed = run_workflow("task", state_dir, lambda _task: "saved plan", fail, self.fail)
+            path = record_path(state_dir, failed["run_id"])
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["stage_outputs"]["plan"] = 1
+            path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid stage output"):
+                continue_workflow(state_dir, failed["run_id"], self.fail, self.fail, self.fail)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["error"], "rate_limited")
+
+    def test_details_failure_still_records_the_provider_error(self):
+        def fail(_text):
+            raise ProviderError("authorization_failed")
+
+        def boom() -> dict[str, object]:
+            raise KeyError("usage")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            record = run_workflow("task", state_dir, fail, self.fail, self.fail, details=boom)
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["error"], "authorization_failed")
+            saved = json.loads(record_path(state_dir, record["run_id"]).read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["error"], "authorization_failed")

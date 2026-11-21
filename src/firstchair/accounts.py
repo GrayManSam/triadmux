@@ -97,6 +97,23 @@ def claude_failure(stdout: str) -> str:
     return "provider_exit"
 
 
+def list_profiles() -> list[dict[str, str]]:
+    """Every named sign-in on this machine, by provider then name."""
+    root = profile_root()
+    profiles: list[dict[str, str]] = []
+    if root.exists() or root.is_symlink():
+        private_directory(root.parent, create=False)
+        private_directory(root, create=False)
+        for provider in LOGIN:
+            directory = root / provider
+            if directory.exists() or directory.is_symlink():
+                private_directory(directory, create=False)
+                for candidate in sorted(directory.iterdir()):
+                    profile_home(provider, candidate.name)
+                    profiles.append({"provider": provider, "profile": candidate.name})
+    return profiles
+
+
 def configure_parser(parser: argparse.ArgumentParser) -> None:
     commands = parser.add_subparsers(dest="auth_command", required=True)
     login = commands.add_parser("login", help="Sign in through the provider CLI")
@@ -108,24 +125,52 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     check.add_argument("profile", nargs="?")
     check.add_argument("--probe", action="store_true", help="Also test Claude inference with a fixed prompt")
     commands.add_parser("list", help="List local profile aliases")
+    usage = commands.add_parser("usage", help="Show what Firstchair sent through each account, and cooldowns")
+    usage.add_argument("--window", type=float, default=5 * 3600.0, help="Seconds to look back (default 18000)")
+    usage.add_argument(
+        "--refresh", action="store_true",
+        help="Ask each provider for real usage now. Claude Code is asked with one short prompt per account",
+    )
+    clear = commands.add_parser("clear-cooldown", help="Let accounts in a cooldown be used again")
+    clear.add_argument("account", nargs="*", help="PROVIDER or PROVIDER:PROFILE (default: all)")
 
 
 def execute(args: argparse.Namespace) -> int:
     try:
         if args.auth_command == "list":
-            root = profile_root()
-            profiles = []
-            if root.exists() or root.is_symlink():
-                private_directory(root.parent, create=False)
-                private_directory(root, create=False)
-                for provider in LOGIN:
-                    directory = root / provider
-                    if directory.exists() or directory.is_symlink():
-                        private_directory(directory, create=False)
-                        for candidate in sorted(directory.iterdir()):
-                            profile_home(provider, candidate.name)
-                            profiles.append({"provider": provider, "profile": candidate.name})
-            print(json.dumps({"profiles": profiles}, indent=2))
+            print(json.dumps({"profiles": list_profiles()}, indent=2))
+            return 0
+        if args.auth_command in {"usage", "clear-cooldown"}:
+            from . import rotation  # Imported here: rotation imports this module.
+
+            path = rotation.ledger_path()
+            if args.auth_command == "clear-cooldown":
+                cleared = rotation.clear_cooldowns(path, args.account or None)
+                print(json.dumps({"cleared": cleared}, indent=2))
+                return 0
+            policy = rotation.Policy(window_seconds=args.window)
+            if args.refresh:
+                from .quota import READERS, read_quota
+
+                # Named sign-ins, plus the default sign-in of each provider that can be asked.
+                targets = [(item["provider"], item["profile"]) for item in list_profiles()]
+                targets += [(provider, None) for provider in READERS if shutil.which(provider)]
+                readings = {
+                    rotation.account_key(provider, profile): quota
+                    for provider, profile in targets
+                    if (quota := read_quota(provider, profile)) is not None
+                }
+                rotation.store_quota(path, readings)
+            ledger = rotation.read_ledger(path)
+            keys = sorted({
+                *ledger,
+                *(rotation.account_key(item["provider"], item["profile"]) for item in list_profiles()),
+            })
+            now = rotation.time.time()
+            print(json.dumps({
+                "window_seconds": policy.window_seconds,
+                "accounts": [rotation.standing(key, ledger, policy, now) for key in keys],
+            }, indent=2))
             return 0
         provider = args.provider
         if shutil.which(provider) is None:

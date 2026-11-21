@@ -6,7 +6,8 @@ description: Lead a Firstchair slice by dispatching Codex and Grok Build workers
 # Orchestrate Codex and Grok
 
 Claude Code is the lead. Workers run headless through `scripts/delegate.py`,
-each in its own git worktree under `~/.cache/firstchair/worktrees/triad-mux/`.
+each in its own git worktree. Use the `worktree` path reported by
+`firstchair delegate list` for the named job.
 
 ## 1. Plan
 
@@ -22,13 +23,29 @@ each in its own git worktree under `~/.cache/firstchair/worktrees/triad-mux/`.
 4. Commit the lead's own pending work before dispatching, or pass
    `--with-changes` so workers see it.
 
+## Conductor score
+
+For a recorded desk, write a score JSON file and run it as the primary:
+
+```sh
+firstchair conduct plan --lead claude --score /tmp/score.json
+firstchair conduct run --lead claude --name slice --score /tmp/score.json
+firstchair conduct status slice
+```
+
+Seat `self` starts another Claude Code worker. Seats `codex` and `grok`
+start those CLIs. The score runs one part at a time and stops after a
+failure. The board does not store task text or replies. Independent
+overlapping work still uses separate `delegate run` commands below until
+the parallel score story in `TODO.md` is implemented.
+
 ## 2. Dispatch
 
 ```sh
 # read: disposable detached worktree, removed afterwards
 python3 scripts/delegate.py run codex --name review-x "Review ... Report file:line findings."
 # write: worktree kept on branch delegate/NAME
-python3 scripts/delegate.py run grok --mode write --name docs-x --prompt-file /path/task.md
+python3 scripts/delegate.py run codex --mode write --name docs-x --prompt-file /path/task.md
 ```
 
 - Run each dispatch with Bash `run_in_background: true` and launch independent
@@ -43,7 +60,7 @@ python3 scripts/delegate.py run grok --mode write --name docs-x --prompt-file /p
    Do not trust the reply's claims about tests; rerun them in the worktree:
    `cd <worktree> && PYTHONPATH=src python -m unittest discover -s tests -v`.
 3. Check AGENTS.md rules: invented fixtures only, no credentials or
-   transcripts, live adapters stay disabled, fail-closed parsing.
+   transcripts and fail-closed parsing. The product's live adapters are read-only.
 4. For a non-trivial diff, get a cross-review: dispatch the *other* worker in
    read mode with the diff in the prompt, or review it yourself.
 5. To request fixes, dispatch a follow-up write task with a new `--name` and

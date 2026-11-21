@@ -30,6 +30,7 @@ Increment the prerelease counter for each new build in a stage. Patch releases f
 
 ## Beta · 0.1.0b1
 
+- Let the primary seat conduct a score: assign parts to its own provider and to Codex, Claude Code, and Grok Build, run them one at a time in isolated worktrees, and stop when a part fails.
 - Expand test coverage to real provider contract smoke checks run by maintainers with explicit opt-in. Publish a supported platform, Python and provider version matrix.
 - Verify restart recovery, bounded parallel read-only tasks, worktree isolation for approved write tasks, and transactional state migrations. Preserve completed work and require review when an interrupted write has an ambiguous outcome.
 - Exercise fallback against classified transient failures, with cooldowns and bounded retries for eligible idempotent work. Document the difference between observed usage and charges.

@@ -5,6 +5,7 @@ import os
 import stat
 from pathlib import Path
 
+from .sessions import SESSION_PATTERN
 from .workflow import record_path
 
 _STATUSES = ("running", "completed", "failed", "interrupted")
@@ -35,7 +36,11 @@ def _read_summary(path: Path) -> dict[str, str] | None:
         or record.get("stage") not in _STAGES
     ):
         return None
-    return {"run_id": run_id, "status": record["status"], "stage": record["stage"]}
+    summary = {"run_id": run_id, "status": record["status"], "stage": record["stage"]}
+    owner = record.get("session")
+    if isinstance(owner, str) and SESSION_PATTERN.fullmatch(owner):
+        summary["session"] = owner
+    return summary
 
 
 def list_runs(state_dir: Path) -> list[dict[str, str]]:
